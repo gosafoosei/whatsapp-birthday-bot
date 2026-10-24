@@ -1,0 +1,62 @@
+name: whatsapp-bot
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch: {}
+
+concurrency:
+  group: whatsapp-bot
+  cancel-in-progress: true
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 9
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Restore WhatsApp session and browser
+        uses: actions/cache@v4
+        with:
+          path: |
+            .wwebjs_auth
+            ~/.cache/puppeteer
+          key: wa-session-v1
+
+      - name: Seed session from gist on first run
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GIST_ID: ${{ secrets.GIST_ID }}
+        run: |
+          if [ ! -d .wwebjs_auth/session ]; then
+            echo "No cached session found — seeding from gist"
+            git clone --depth 1 "https://x-access-token:${GH_PAT}@gist.github.com/${GIST_ID}.git" gist
+            cat gist/session.zip.part-* > session.zip
+            unzip -q session.zip -d .
+            rm -rf gist session.zip
+          else
+            echo "Session restored from cache"
+          fi
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+
+      - name: Send messages
+        env:
+          ONCE: '1'
+          MESSAGE: ${{ secrets.MESSAGE }}
+          CONTACTS_JSON: ${{ secrets.CONTACTS_JSON }}
+        run: node index.js
+
+      - name: Upload QR code if session needs re-linking
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qr-code
+          path: qr.png
+          if-no-files-found: ignore
