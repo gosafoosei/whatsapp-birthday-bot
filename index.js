@@ -94,7 +94,7 @@ async function sendAll() {
     try {
       if (contact.group) {
         const chat = await resolveGroupChat(contact.group);
-        await chat.sendMessage(config.message);
+        await client.sendMessage(chat.id._serialized, config.message);
         console.log(`[sent]   ${contact.name} (${chat.id._serialized})`);
       } else {
         const chatId = chatIdFor(contact.number);
@@ -102,7 +102,7 @@ async function sendAll() {
         console.log(`[sent]   ${contact.name} (${chatId})`);
       }
     } catch (err) {
-      console.error(`[failed] ${contact.name}: ${err.message}`);
+      console.error(`[failed] ${contact.name}: ${(err && err.stack) || (err && err.message) || String(err)}`.split('\n').slice(0, 4).join(' | '));
     }
     await new Promise((resolve) => setTimeout(resolve, PAUSE_BETWEEN_SENDS_MS));
   }
