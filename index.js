@@ -109,18 +109,47 @@ async function sendAll() {
 }
 
 // Groups are addressed by name; resolve against the chats WhatsApp knows about.
+// client.getChats() fails entirely if even one chat fails to serialize, so
+// prefer a defensive direct read of the chat store that skips unreadable
+// entries, and fall back to the public API only if that yields nothing.
 async function resolveGroupChat(groupName) {
-  const chats = await client.getChats();
-  const groups = chats.filter((c) => c.isGroup);
+  let groups = [];
+  try {
+    groups = await client.pupPage.evaluate(() => {
+      const out = [];
+      const store = window.Store && window.Store.Chat;
+      const models = store
+        ? (typeof store.getModelsArray === 'function' ? store.getModelsArray() : store.models || [])
+        : [];
+      for (const c of models) {
+        try {
+          const id = c && c.id && c.id._serialized;
+          if (id && id.endsWith('@g.us')) {
+            out.push({ id, name: c.name || c.formattedTitle || '' });
+          }
+        } catch (e) { /* skip unreadable chat */ }
+      }
+      return out;
+    });
+  } catch (err) {
+    console.error(`Store listing failed, falling back to getChats(): ${err.message}`);
+  }
+  if (!groups.length) {
+    const chats = await client.getChats();
+    groups = chats
+      .filter((c) => c.isGroup)
+      .map((c) => ({ id: c.id._serialized, name: c.name || '' }));
+  }
+  const norm = (s) => (s || '').toLowerCase().trim();
   const chat =
-    groups.find((c) => c.name === groupName) ||
-    groups.find((c) => c.name.toLowerCase().trim() === groupName.toLowerCase().trim());
+    groups.find((g) => g.name === groupName) ||
+    groups.find((g) => norm(g.name) === norm(groupName));
   if (!chat) {
     throw new Error(
       `group "${groupName}" not found; groups seen: ${groups.map((g) => g.name).join(' | ') || 'none'}`
     );
   }
-  return chat;
+  return { id: { _serialized: chat.id }, name: chat.name };
 }
 
 // Removes regenerable Chromium cache dirs so the cloud cache stays small.
