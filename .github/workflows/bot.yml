@@ -1,7 +1,9 @@
 name: whatsapp-bot
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    # Backstop only: the run normally relaunches itself. Fires every 2 hours
+    # at :37 (off the crowded 5-min boundaries) and takes over the relay.
+    - cron: '37 */2 * * *'
   workflow_dispatch: {}
 
 concurrency:
@@ -11,7 +13,7 @@ concurrency:
 jobs:
   send:
     runs-on: ubuntu-latest
-    timeout-minutes: 14
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
 
@@ -46,9 +48,10 @@ jobs:
       - name: Install dependencies
         run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
 
-      - name: Send messages
+      - name: Run bot (long-runner)
         env:
-          ONCE: '1'
+          LONG: '1'
+          LONG_MINUTES: '330'
           MESSAGE: ${{ vars.MESSAGE }}
           CONTACTS_JSON: ${{ vars.CONTACTS_JSON }}
           LAST_SEND: ${{ vars.LAST_SEND }}

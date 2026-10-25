@@ -16,6 +16,14 @@ const SEND_INTERVAL_MS = 30 * 60 * 1000; // send every 30 minutes
 const SEND_IMMEDIATELY = true;           // false = only send on each half-hour mark
 const PAUSE_BETWEEN_SENDS_MS = 3000;     // gentle pacing between contacts
 
+// LONG=1 (cloud): stay connected for LONG_MINUTES and send on the bot's own
+// 30-minute clock instead of one round per trigger. GitHub's cron skips
+// slots badly, so the run relaunches itself at the end; an every-2-hours
+// cron backstop covers relaunch failures.
+const LONG_MINUTES = parseInt(process.env.LONG_MINUTES || '330', 10);
+const LONG_MINUTES_MS = LONG_MINUTES * 60 * 1000;
+const MIN_RUN_FOR_RELAUNCH_MS = 10 * 60 * 1000; // don't self-relaunch a crash loop
+
 // contacts.json ships with this placeholder so nothing sends until you
 // replace it with a real number (country code + number, digits only).
 const PLACEHOLDER_NUMBER = '15551234567';
@@ -62,6 +70,10 @@ client.on('qr', async (qr) => {
 
 client.on('ready', () => {
   console.log(`Connected as ${client.info.pushname}.`);
+  if (process.env.LONG === '1') {
+    startLongRunner();
+    return;
+  }
   const round = () => {
     const cfg = loadConfig();
     return sendAll(cfg.contacts, cfg.message).catch((err) => console.error('Send round failed:', err.message));
@@ -142,8 +154,122 @@ client.on('auth_failure', (msg) => console.error('Authentication failed:', msg))
 
 client.on('disconnected', (reason) => {
   console.error('Disconnected from WhatsApp:', reason);
+  if (process.env.LONG === '1') {
+    if (!longRunnerStopped) {
+      // Run got killed mid-flight (network blip, WhatsApp logout). Hand off
+      // to a fresh run so the cadence continues; finish() guards double-fire.
+      finishLongRunner('disconnected: ' + reason);
+    }
+    return;
+  }
   process.exit(1);
 });
+
+let longRunnerStopped = false;
+
+// Stays connected for LONG_MINUTES and runs the send round on the bot's own
+// 30-minute clock, then hands off to a fresh run. Only one job is ever live
+// (workflow concurrency), so the per-run dedup below is just for the first
+// round after a takeover.
+function startLongRunner() {
+  const startedAt = Date.now();
+  const deadline = startedAt + LONG_MINUTES_MS;
+  const minGapMs = 25 * 60 * 1000;
+  let lastSend = parseInt(process.env.LAST_SEND || '0', 10) || 0;
+  let lastDaily = process.env.LAST_DAILY || '';
+  let timer = null;
+
+  const finish = async (reason) => {
+    if (longRunnerStopped) return;
+    longRunnerStopped = true;
+    if (timer) clearInterval(timer);
+    console.log(
+      `Long-runner stopping (${reason}) after ${Math.round((Date.now() - startedAt) / 60000)} min.`
+    );
+    try {
+      await client.destroy();
+    } catch (e) { /* exiting anyway */ }
+    // A run that never really started shouldn't self-relaunch (crash loop
+    // would burn minutes); the cron backstop restarts those.
+    if (Date.now() - startedAt >= MIN_RUN_FOR_RELAUNCH_MS) {
+      await dispatchNextRun();
+    } else {
+      console.log('Run too short to relaunch — the cron backstop will restart it.');
+    }
+    cleanupBrowserCaches();
+    process.exit(0);
+  };
+
+  const round = async () => {
+    if (longRunnerStopped) return;
+    if (Date.now() >= deadline) return finish('deadline reached');
+    try {
+      const config = loadConfig();
+      const now = Date.now();
+      const todayKey = new Date(now).toISOString().slice(0, 10);
+      const nowDate = new Date(now);
+      const minutesNow = nowDate.getUTCHours() * 60 + nowDate.getUTCMinutes();
+      const regular = config.contacts.filter((c) => !c.schedule);
+      const daily = config.contacts.filter((c) => c.schedule);
+      const regularDue = regular.length > 0 && (!lastSend || now - lastSend >= minGapMs);
+      const dailyDue = daily.some((c) => {
+        const parts = String(c.schedule).split(':');
+        const dueMinutes = (parseInt(parts[0], 10) || 0) * 60 + (parseInt(parts[1], 10) || 0);
+        return minutesNow >= dueMinutes && lastDaily !== todayKey;
+      });
+      if (!regularDue && !dailyDue) {
+        const nextRegular = lastSend
+          ? `regular next in ${Math.max(0, Math.ceil((minGapMs - (now - lastSend)) / 60000))} min`
+          : 'regular due';
+        console.log(
+          `Nothing due: ${nextRegular}, daily ${lastDaily === todayKey ? 'already sent today' : `waiting for slot (now ${minutesNow}min UTC)`}.`
+        );
+        return;
+      }
+      if (regularDue) {
+        await sendAll(regular, config.message);
+        lastSend = Date.now();
+        await updateVariable('LAST_SEND', String(lastSend));
+      }
+      if (dailyDue) {
+        await sendAll(daily, config.message);
+        lastDaily = todayKey;
+        await updateVariable('LAST_DAILY', todayKey);
+      }
+    } catch (err) {
+      console.error('Round failed:', (err && err.stack) || err);
+    }
+  };
+
+  console.log(`Long-runner mode: staying connected for ${LONG_MINUTES} minutes.`);
+  round();
+  timer = setInterval(round, SEND_INTERVAL_MS);
+}
+
+// Starts the next long-runner job via the API so the relay keeps going even
+// if GitHub's cron never fires.
+async function dispatchNextRun() {
+  const token = process.env.GH_PAT;
+  const repo = process.env.GITHUB_REPOSITORY;
+  if (!token || !repo) {
+    console.log('No GH_PAT/GITHUB_REPOSITORY set — cannot self-relaunch.');
+    return;
+  }
+  try {
+    const res = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/bot.yml/dispatches`, {
+      method: 'POST',
+      headers: { Authorization: `token ${token}`, Accept: 'application/vnd.github+json' },
+      body: JSON.stringify({ ref: 'main' }),
+    });
+    console.log(
+      res.status === 204
+        ? 'Next run dispatched.'
+        : `Next run dispatch failed (HTTP ${res.status}).`
+    );
+  } catch (e) {
+    console.error(`Next run dispatch failed: ${e.message}`);
+  }
+}
 
 async function sendAll(contacts, message) {
   console.log(`\n--- Send round started at ${new Date().toLocaleTimeString()} ---`);

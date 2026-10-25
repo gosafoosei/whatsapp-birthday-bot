@@ -5,8 +5,10 @@ minutes) using a WhatsApp Web session driven by
 [whatsapp-web.js](https://github.com/pedroslopez/whatsapp-web.js), run on
 GitHub Actions so no personal computer needs to stay on.
 
-- Scheduling: GitHub Actions cron (`*/30 * * * *`) triggers one-shot runs
-  (`ONCE=1`): connect, send, clean up, exit.
+- Scheduling: long-runner mode (`LONG=1`). Each job stays connected ~5.5 h
+  and sends on the bot's own 30-minute clock, then relaunches the next job
+  via the API, so GitHub's flaky cron is only a backstop (every 2 h at :37,
+  plus manual `workflow_dispatch`). Only one job is ever live at a time.
 - The WhatsApp session lives in the Actions cache; on a cold cache it is
   seeded from a private gist.
 - Message and recipients come from repository secrets (`MESSAGE`,
