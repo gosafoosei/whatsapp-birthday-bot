@@ -133,45 +133,36 @@ async function resolveGroupChatId(groupName) {
   for (let attempt = 1; attempt <= 25; attempt++) {
     try {
       const result = await client.pupPage.evaluate(() => {
-        const debug = {};
         const out = [];
+        let moduleCount = 0;
         try {
-          const store = window.Store && window.Store.Chat;
-          debug.hasStore = !!store;
-          let models = [];
-          if (store) {
-            debug.storeType = (store.constructor && store.constructor.name) || typeof store;
-            if (typeof store.getModelsArray === 'function') {
-              models = store.getModelsArray();
-              debug.via = 'getModelsArray';
-            } else if (Array.isArray(store.models)) {
-              models = store.models;
-              debug.via = 'models-array';
-            } else if (store.models && typeof store.models.values === 'function') {
-              models = [...store.models.values()];
-              debug.via = 'models-map';
-            } else if (store.models && typeof store.models === 'object') {
-              models = Object.values(store.models);
-              debug.via = 'models-object';
-            }
-          }
-          debug.count = models.length;
-          for (const c of models) {
+          const store = window.Store || {};
+          const keys = Object.keys(store);
+          moduleCount = keys.length;
+          for (const key of keys) {
             try {
-              const serialized = c && c.id && c.id._serialized;
-              if (serialized && String(serialized).endsWith('@g.us')) {
-                out.push({ id: serialized, name: c.name || c.formattedTitle || '' });
+              const mod = store[key];
+              let models = null;
+              if (mod && typeof mod.getModelsArray === 'function') models = mod.getModelsArray();
+              else if (mod && Array.isArray(mod.models)) models = mod.models;
+              else if (mod && mod.models && typeof mod.models.values === 'function') models = [...mod.models.values()];
+              if (!models || !models.length) continue;
+              for (const c of models) {
+                try {
+                  const serialized = c && c.id && c.id._serialized;
+                  if (serialized && String(serialized).endsWith('@g.us')) {
+                    out.push({ id: serialized, name: c.name || c.formattedTitle || '' });
+                  }
+                } catch (e) { /* skip unreadable chat */ }
               }
-            } catch (e) { /* skip unreadable chat */ }
+            } catch (e) { /* skip unusable module */ }
           }
-        } catch (e) {
-          debug.error = String((e && e.message) || e);
-        }
-        return { groups: out, debug };
+        } catch (e) { /* ignore */ }
+        return { groups: out, moduleCount };
       });
       groups = result.groups;
       if (!groups.length && attempt === 1) {
-        console.error(`Chat store not ready yet, debug: ${JSON.stringify(result.debug)}`);
+        console.error(`No groups found in store yet (${result.moduleCount} modules scanned)`);
       }
     } catch (err) {
       console.error(`Group listing attempt ${attempt} failed: ${err.message}`);
