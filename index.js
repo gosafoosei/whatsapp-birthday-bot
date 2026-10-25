@@ -98,7 +98,12 @@ client.on('ready', () => {
       });
 
       if (!regularDue && !dailyDue) {
-        console.log('Skipping: nothing due (regular every 30 min; daily after their scheduled time).');
+        const list = config.contacts
+          .map((c) => (c.schedule ? `${c.name}@${c.schedule}` : `${c.name}@regular`))
+          .join(', ');
+        console.log(
+          `Skipping: nothing due (contacts: [${list}] now=${minutesNow}min UTC, lastDaily=${process.env.LAST_DAILY || '-'})`
+        );
         client.destroy().finally(() => process.exit(0));
         return;
       }
