@@ -132,56 +132,35 @@ async function resolveGroupChatId(groupName) {
   let groups = [];
   for (let attempt = 1; attempt <= 25; attempt++) {
     try {
-      const result = await client.pupPage.evaluate(() => {
+      const result = await client.pupPage.evaluate((wantName) => {
+        const norm = (s) => (s || '').toLowerCase().trim();
         const out = [];
-        let moduleCount = 0;
         try {
-          const store = window.Store || {};
-          const keys = Object.keys(store);
-          moduleCount = keys.length;
-          for (const key of keys) {
+          const chats = window.require('WAWebCollections').Chat.getModelsArray();
+          for (const c of chats) {
             try {
-              const mod = store[key];
-              let models = null;
-              if (mod && typeof mod.getModelsArray === 'function') models = mod.getModelsArray();
-              else if (mod && Array.isArray(mod.models)) models = mod.models;
-              else if (mod && mod.models && typeof mod.models.values === 'function') models = [...mod.models.values()];
-              if (!models || !models.length) continue;
-              for (const c of models) {
-                try {
-                  const serialized = c && c.id && c.id._serialized;
-                  if (serialized && String(serialized).endsWith('@g.us')) {
-                    out.push({ id: serialized, name: c.name || c.formattedTitle || '' });
-                  }
-                } catch (e) { /* skip unreadable chat */ }
+              const serialized = c && c.id && c.id._serialized;
+              if (serialized && String(serialized).endsWith('@g.us')) {
+                out.push({ id: serialized, name: c.name || c.formattedTitle || '' });
               }
-            } catch (e) { /* skip unusable module */ }
+            } catch (e) { /* skip unreadable chat */ }
           }
-        } catch (e) { /* ignore */ }
-        return { groups: out, moduleCount };
-      });
-      groups = result.groups;
-      if (!groups.length && attempt === 1) {
-        console.error(`No groups found in store yet (${result.moduleCount} modules scanned)`);
+          const match = out.find((g) => norm(g.name) === norm(wantName));
+          return { groups: out, matchId: match ? match.id : null, count: chats.length };
+        } catch (e) {
+          return { groups: [], matchId: null, count: 0, error: String((e && e.message) || e) };
+        }
+      }, groupName);
+      if (result.error) {
+        console.error(`Group listing attempt ${attempt} error: ${result.error}`);
       }
+    if (result.matchId) return result.matchId;
+    groups = result.groups;
+    if (attempt === 1) {
+      console.log(`[groups] ${groups.map((g) => g.name).join(' | ') || '(none yet)'} (chats loaded: ${result.count})`);
+    }
     } catch (err) {
       console.error(`Group listing attempt ${attempt} failed: ${err.message}`);
-    }
-    if (groups.some((g) => norm(g.name) === norm(groupName))) break;
-    if (groups.length && attempt === 1) {
-      console.log(`[groups] ${groups.map((g) => g.name).join(' | ') || '(no names yet)'}`);
-    }
-    if (!groups.length) {
-      try {
-        const chats = await client.getChats();
-        const viaApi = chats
-          .filter((c) => c.isGroup)
-          .map((c) => ({ id: c.id._serialized, name: c.name || '' }));
-        if (viaApi.length) {
-          groups = viaApi;
-          console.log(`[groups] via getChats: ${groups.map((g) => g.name).join(' | ')}`);
-        }
-      } catch (e) { /* getChats can throw while chats hydrate — ignore */ }
     }
     if (groups.some((g) => norm(g.name) === norm(groupName))) break;
     await new Promise((resolve) => setTimeout(resolve, 4000));
