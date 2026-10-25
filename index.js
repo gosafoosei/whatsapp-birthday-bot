@@ -67,12 +67,16 @@ client.on('ready', () => {
     (async () => {
       // GitHub's cron can skip slots, so the workflow fires every 5 minutes and
       // this gate enforces the real cadence: at most one send per 30 minutes.
+      // The timestamp lives in a repo variable (updated via API after each
+      // send) because the actions cache never overwrites an existing entry.
       const lastSendPath = path.join(__dirname, '.wwebjs_auth', 'last-send.txt');
       const minGapMs = 25 * 60 * 1000;
-      let lastSend = 0;
-      try {
-        lastSend = parseInt(fs.readFileSync(lastSendPath, 'utf8'), 10) || 0;
-      } catch (e) { /* no marker yet */ }
+      let lastSend = parseInt(process.env.LAST_SEND || '0', 10) || 0;
+      if (!lastSend) {
+        try {
+          lastSend = parseInt(fs.readFileSync(lastSendPath, 'utf8'), 10) || 0;
+        } catch (e) { /* no marker yet */ }
+      }
       const sinceLast = Date.now() - lastSend;
       if (lastSend && sinceLast < minGapMs) {
         console.log(`Skipping: last send was ${Math.round(sinceLast / 60000)} min ago (target: every 30 min).`);
@@ -80,9 +84,11 @@ client.on('ready', () => {
         return;
       }
       await round();
+      const now = Date.now();
       try {
-        fs.writeFileSync(lastSendPath, String(Date.now()));
+        fs.writeFileSync(lastSendPath, String(now));
       } catch (e) { /* marker is best-effort */ }
+      await updateLastSendVariable(now);
       cleanupBrowserCaches();
       console.log('ONCE mode: round complete, exiting.');
       client.destroy().finally(() => process.exit(0));
@@ -223,6 +229,27 @@ async function resolveGroupChatId(groupName) {
     );
   }
   return chat.id;
+}
+
+// Records the send time as a repo variable so the next runs can dedup.
+async function updateLastSendVariable(timestamp) {
+  const token = process.env.GH_PAT;
+  const repo = process.env.GITHUB_REPOSITORY;
+  if (!token || !repo) return;
+  try {
+    const res = await fetch(`https://api.github.com/repos/${repo}/actions/variables/LAST_SEND`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `token ${token}`,
+        Accept: 'application/vnd.github+json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ name: 'LAST_SEND', value: String(timestamp) }),
+    });
+    console.log(`Last-send timestamp ${res.ok ? 'updated' : 'update failed (HTTP ' + res.status + ')'}.`);
+  } catch (e) {
+    console.error(`Could not update last-send variable: ${e.message}`);
+  }
 }
 
 // Removes regenerable Chromium cache dirs so the cloud cache stays small.
