@@ -177,13 +177,21 @@ async function resolveGroupChatId(groupName) {
       console.error(`Group listing attempt ${attempt} failed: ${err.message}`);
     }
     if (groups.some((g) => norm(g.name) === norm(groupName))) break;
-    try {
-      const chats = await client.getChats();
-      const viaApi = chats
-        .filter((c) => c.isGroup)
-        .map((c) => ({ id: c.id._serialized, name: c.name || '' }));
-      if (viaApi.length > groups.length) groups = viaApi;
-    } catch (e) { /* getChats can throw while chats hydrate — ignore */ }
+    if (groups.length && attempt === 1) {
+      console.log(`[groups] ${groups.map((g) => g.name).join(' | ') || '(no names yet)'}`);
+    }
+    if (!groups.length) {
+      try {
+        const chats = await client.getChats();
+        const viaApi = chats
+          .filter((c) => c.isGroup)
+          .map((c) => ({ id: c.id._serialized, name: c.name || '' }));
+        if (viaApi.length) {
+          groups = viaApi;
+          console.log(`[groups] via getChats: ${groups.map((g) => g.name).join(' | ')}`);
+        }
+      } catch (e) { /* getChats can throw while chats hydrate — ignore */ }
+    }
     if (groups.some((g) => norm(g.name) === norm(groupName))) break;
     await new Promise((resolve) => setTimeout(resolve, 4000));
   }
