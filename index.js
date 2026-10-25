@@ -111,36 +111,45 @@ client.on('disconnected', (reason) => {
 async function sendAll() {
   const config = loadConfig();
   console.log(`\n--- Send round started at ${new Date().toLocaleTimeString()} ---`);
-  for (const contact of config.contacts) {
-    try {
-      if (contact.group) {
-        const groupId = await resolveGroupChatId(contact.group);
-        let sent = false;
-        const attempts = [];
-        try {
-          const chat = await client.getChatById(groupId);
-          await chat.sendMessage(config.message);
-          sent = true;
-        } catch (e1) {
-          attempts.push(`chat.sendMessage: ${(e1 && e1.message) || e1}`);
+  let pending = config.contacts;
+  for (let pass = 1; pass <= 2; pass++) {
+    const failed = [];
+    for (const contact of pending) {
+      try {
+        if (contact.group) {
+          const groupId = await resolveGroupChatId(contact.group);
+          let sent = false;
+          const attempts = [];
           try {
-            await client.sendMessage(groupId, config.message);
+            const chat = await client.getChatById(groupId);
+            await chat.sendMessage(config.message);
             sent = true;
-          } catch (e2) {
-            attempts.push(`client.sendMessage: ${(e2 && e2.message) || e2}`);
+          } catch (e1) {
+            attempts.push(`chat.sendMessage: ${(e1 && e1.message) || e1}`);
+            try {
+              await client.sendMessage(groupId, config.message);
+              sent = true;
+            } catch (e2) {
+              attempts.push(`client.sendMessage: ${(e2 && e2.message) || e2}`);
+            }
           }
+          if (!sent) throw new Error(attempts.join(' | '));
+          console.log(`[sent]   ${contact.name} (${groupId})`);
+        } else {
+          const chatId = chatIdFor(contact.number);
+          await client.sendMessage(chatId, config.message);
+          console.log(`[sent]   ${contact.name} (${chatId})`);
         }
-        if (!sent) throw new Error(attempts.join(' | '));
-        console.log(`[sent]   ${contact.name} (${groupId})`);
-      } else {
-        const chatId = chatIdFor(contact.number);
-        await client.sendMessage(chatId, config.message);
-        console.log(`[sent]   ${contact.name} (${chatId})`);
+      } catch (err) {
+        failed.push(contact);
+        console.error(`[failed] ${contact.name}: ${(err && err.stack) || (err && err.message) || String(err)}`.split('\n').slice(0, 4).join(' | '));
       }
-    } catch (err) {
-      console.error(`[failed] ${contact.name}: ${(err && err.stack) || (err && err.message) || String(err)}`.split('\n').slice(0, 4).join(' | '));
+      await new Promise((resolve) => setTimeout(resolve, PAUSE_BETWEEN_SENDS_MS));
     }
-    await new Promise((resolve) => setTimeout(resolve, PAUSE_BETWEEN_SENDS_MS));
+    if (!failed.length || pass === 2) return;
+    console.log(`Retrying ${failed.length} contact(s) after 30s...`);
+    await new Promise((resolve) => setTimeout(resolve, 30000));
+    pending = failed;
   }
 }
 
