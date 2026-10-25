@@ -92,14 +92,35 @@ async function sendAll() {
   console.log(`\n--- Send round started at ${new Date().toLocaleTimeString()} ---`);
   for (const contact of config.contacts) {
     try {
-      const chatId = chatIdFor(contact.number);
-      await client.sendMessage(chatId, config.message);
-      console.log(`[sent]   ${contact.name} (${chatId})`);
+      if (contact.group) {
+        const chat = await resolveGroupChat(contact.group);
+        await chat.sendMessage(config.message);
+        console.log(`[sent]   ${contact.name} (${chat.id._serialized})`);
+      } else {
+        const chatId = chatIdFor(contact.number);
+        await client.sendMessage(chatId, config.message);
+        console.log(`[sent]   ${contact.name} (${chatId})`);
+      }
     } catch (err) {
       console.error(`[failed] ${contact.name}: ${err.message}`);
     }
     await new Promise((resolve) => setTimeout(resolve, PAUSE_BETWEEN_SENDS_MS));
   }
+}
+
+// Groups are addressed by name; resolve against the chats WhatsApp knows about.
+async function resolveGroupChat(groupName) {
+  const chats = await client.getChats();
+  const groups = chats.filter((c) => c.isGroup);
+  const chat =
+    groups.find((c) => c.name === groupName) ||
+    groups.find((c) => c.name.toLowerCase().trim() === groupName.toLowerCase().trim());
+  if (!chat) {
+    throw new Error(
+      `group "${groupName}" not found; groups seen: ${groups.map((g) => g.name).join(' | ') || 'none'}`
+    );
+  }
+  return chat;
 }
 
 // Removes regenerable Chromium cache dirs so the cloud cache stays small.
