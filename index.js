@@ -64,10 +64,31 @@ client.on('ready', () => {
   console.log(`Connected as ${client.info.pushname}.`);
   const round = () => sendAll().catch((err) => console.error('Send round failed:', err.message));
   if (process.env.ONCE === '1') {
-    round().then(() => {
+    (async () => {
+      // GitHub's cron can skip slots, so the workflow fires every 5 minutes and
+      // this gate enforces the real cadence: at most one send per 30 minutes.
+      const lastSendPath = path.join(__dirname, '.wwebjs_auth', 'last-send.txt');
+      const minGapMs = 25 * 60 * 1000;
+      let lastSend = 0;
+      try {
+        lastSend = parseInt(fs.readFileSync(lastSendPath, 'utf8'), 10) || 0;
+      } catch (e) { /* no marker yet */ }
+      const sinceLast = Date.now() - lastSend;
+      if (lastSend && sinceLast < minGapMs) {
+        console.log(`Skipping: last send was ${Math.round(sinceLast / 60000)} min ago (target: every 30 min).`);
+        client.destroy().finally(() => process.exit(0));
+        return;
+      }
+      await round();
+      try {
+        fs.writeFileSync(lastSendPath, String(Date.now()));
+      } catch (e) { /* marker is best-effort */ }
       cleanupBrowserCaches();
       console.log('ONCE mode: round complete, exiting.');
       client.destroy().finally(() => process.exit(0));
+    })().catch((err) => {
+      console.error('ONCE mode failed:', (err && err.stack) || err);
+      client.destroy().finally(() => process.exit(1));
     });
     return;
   }
