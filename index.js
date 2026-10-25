@@ -130,29 +130,62 @@ async function sendAll() {
 async function resolveGroupChatId(groupName) {
   const norm = (s) => (s || '').toLowerCase().trim();
   let groups = [];
-  for (let attempt = 1; attempt <= 20; attempt++) {
+  for (let attempt = 1; attempt <= 25; attempt++) {
     try {
-      groups = await client.pupPage.evaluate(() => {
+      const result = await client.pupPage.evaluate(() => {
+        const debug = {};
         const out = [];
-        const store = window.Store && window.Store.Chat;
-        const models = store
-          ? (typeof store.getModelsArray === 'function' ? store.getModelsArray() : store.models || [])
-          : [];
-        for (const c of models) {
-          try {
-            const id = c && c.id && c.id._serialized;
-            if (id && id.endsWith('@g.us')) {
-              out.push({ id, name: c.name || c.formattedTitle || '' });
+        try {
+          const store = window.Store && window.Store.Chat;
+          debug.hasStore = !!store;
+          let models = [];
+          if (store) {
+            debug.storeType = (store.constructor && store.constructor.name) || typeof store;
+            if (typeof store.getModelsArray === 'function') {
+              models = store.getModelsArray();
+              debug.via = 'getModelsArray';
+            } else if (Array.isArray(store.models)) {
+              models = store.models;
+              debug.via = 'models-array';
+            } else if (store.models && typeof store.models.values === 'function') {
+              models = [...store.models.values()];
+              debug.via = 'models-map';
+            } else if (store.models && typeof store.models === 'object') {
+              models = Object.values(store.models);
+              debug.via = 'models-object';
             }
-          } catch (e) { /* skip unreadable chat */ }
+          }
+          debug.count = models.length;
+          for (const c of models) {
+            try {
+              const serialized = c && c.id && c.id._serialized;
+              if (serialized && String(serialized).endsWith('@g.us')) {
+                out.push({ id: serialized, name: c.name || c.formattedTitle || '' });
+              }
+            } catch (e) { /* skip unreadable chat */ }
+          }
+        } catch (e) {
+          debug.error = String((e && e.message) || e);
         }
-        return out;
+        return { groups: out, debug };
       });
+      groups = result.groups;
+      if (!groups.length && attempt === 1) {
+        console.error(`Chat store not ready yet, debug: ${JSON.stringify(result.debug)}`);
+      }
     } catch (err) {
       console.error(`Group listing attempt ${attempt} failed: ${err.message}`);
     }
     if (groups.some((g) => norm(g.name) === norm(groupName))) break;
-    await new Promise((resolve) => setTimeout(resolve, 3000));
+    try {
+      const chats = await client.getChats();
+      const viaApi = chats
+        .filter((c) => c.isGroup)
+        .map((c) => ({ id: c.id._serialized, name: c.name || '' }));
+      if (viaApi.length > groups.length) groups = viaApi;
+    } catch (e) { /* getChats can throw while chats hydrate — ignore */ }
+    if (groups.some((g) => norm(g.name) === norm(groupName))) break;
+    await new Promise((resolve) => setTimeout(resolve, 4000));
   }
   const chat =
     groups.find((g) => g.name === groupName) ||
