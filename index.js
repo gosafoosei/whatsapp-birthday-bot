@@ -123,45 +123,43 @@ async function sendAll() {
   }
 }
 
-// Groups are addressed by name; resolve against the chats WhatsApp knows about.
-// client.getChats() fails entirely if even one chat fails to serialize, so
-// prefer a defensive direct read of the chat store that skips unreadable
-// entries, and fall back to the public API only if that yields nothing.
+// Groups are addressed by name; resolve to the chat ID by reading WhatsApp's
+// chat store directly. The store fills in over the first seconds after
+// connect, and client.getChats() throws on any unreadable chat, so poll the
+// store defensively until the target group appears.
 async function resolveGroupChatId(groupName) {
-  let groups = [];
-  try {
-    groups = await client.pupPage.evaluate(() => {
-      const out = [];
-      const store = window.Store && window.Store.Chat;
-      const models = store
-        ? (typeof store.getModelsArray === 'function' ? store.getModelsArray() : store.models || [])
-        : [];
-      for (const c of models) {
-        try {
-          const id = c && c.id && c.id._serialized;
-          if (id && id.endsWith('@g.us')) {
-            out.push({ id, name: c.name || c.formattedTitle || '' });
-          }
-        } catch (e) { /* skip unreadable chat */ }
-      }
-      return out;
-    });
-  } catch (err) {
-    console.error(`Store listing failed, falling back to getChats(): ${err.message}`);
-  }
-  if (!groups.length) {
-    const chats = await client.getChats();
-    groups = chats
-      .filter((c) => c.isGroup)
-      .map((c) => ({ id: c.id._serialized, name: c.name || '' }));
-  }
   const norm = (s) => (s || '').toLowerCase().trim();
+  let groups = [];
+  for (let attempt = 1; attempt <= 20; attempt++) {
+    try {
+      groups = await client.pupPage.evaluate(() => {
+        const out = [];
+        const store = window.Store && window.Store.Chat;
+        const models = store
+          ? (typeof store.getModelsArray === 'function' ? store.getModelsArray() : store.models || [])
+          : [];
+        for (const c of models) {
+          try {
+            const id = c && c.id && c.id._serialized;
+            if (id && id.endsWith('@g.us')) {
+              out.push({ id, name: c.name || c.formattedTitle || '' });
+            }
+          } catch (e) { /* skip unreadable chat */ }
+        }
+        return out;
+      });
+    } catch (err) {
+      console.error(`Group listing attempt ${attempt} failed: ${err.message}`);
+    }
+    if (groups.some((g) => norm(g.name) === norm(groupName))) break;
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+  }
   const chat =
     groups.find((g) => g.name === groupName) ||
     groups.find((g) => norm(g.name) === norm(groupName));
   if (!chat) {
     throw new Error(
-      `group "${groupName}" not found; groups seen: ${groups.map((g) => g.name).join(' | ') || 'none'}`
+      `group "${groupName}" not found after waiting; groups seen: ${groups.map((g) => g.name).join(' | ') || 'none'}`
     );
   }
   return chat.id;
