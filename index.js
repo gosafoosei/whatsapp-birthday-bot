@@ -145,8 +145,22 @@ async function resolveGroupChatId(groupName) {
               }
             } catch (e) { /* skip unreadable chat */ }
           }
-          const match = out.find((g) => norm(g.name) === norm(wantName));
-          return { groups: out, matchId: match ? match.id : null, count: chats.length };
+          const exact = out.filter((g) => norm(g.name) === norm(wantName));
+          let match = exact[0] || null;
+          if (!match) {
+            const loose = out.filter((g) => {
+              const a = norm(g.name);
+              const b = norm(wantName);
+              return b && (a.startsWith(b) || b.startsWith(a));
+            });
+            if (loose.length === 1) match = loose[0];
+          }
+          return {
+            groups: out,
+            matchId: match ? match.id : null,
+            matchedName: match ? match.name : null,
+            count: chats.length,
+          };
         } catch (e) {
           return { groups: [], matchId: null, count: 0, error: String((e && e.message) || e) };
         }
@@ -154,7 +168,12 @@ async function resolveGroupChatId(groupName) {
       if (result.error) {
         console.error(`Group listing attempt ${attempt} error: ${result.error}`);
       }
-    if (result.matchId) return result.matchId;
+      if (result.matchId) {
+        if (result.matchedName && result.matchedName !== groupName) {
+          console.log(`[group-match] "${groupName}" matched "${result.matchedName}"`);
+        }
+        return result.matchId;
+      }
     groups = result.groups;
     if (attempt === 1) {
       console.log(`[groups] ${groups.map((g) => g.name).join(' | ') || '(none yet)'} (chats loaded: ${result.count})`);
