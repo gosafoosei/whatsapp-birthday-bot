@@ -93,9 +93,24 @@ async function sendAll() {
   for (const contact of config.contacts) {
     try {
       if (contact.group) {
-        const chat = await resolveGroupChat(contact.group);
-        await client.sendMessage(chat.id._serialized, config.message);
-        console.log(`[sent]   ${contact.name} (${chat.id._serialized})`);
+        const groupId = await resolveGroupChatId(contact.group);
+        let sent = false;
+        const attempts = [];
+        try {
+          const chat = await client.getChatById(groupId);
+          await chat.sendMessage(config.message);
+          sent = true;
+        } catch (e1) {
+          attempts.push(`chat.sendMessage: ${(e1 && e1.message) || e1}`);
+          try {
+            await client.sendMessage(groupId, config.message);
+            sent = true;
+          } catch (e2) {
+            attempts.push(`client.sendMessage: ${(e2 && e2.message) || e2}`);
+          }
+        }
+        if (!sent) throw new Error(attempts.join(' | '));
+        console.log(`[sent]   ${contact.name} (${groupId})`);
       } else {
         const chatId = chatIdFor(contact.number);
         await client.sendMessage(chatId, config.message);
@@ -112,7 +127,7 @@ async function sendAll() {
 // client.getChats() fails entirely if even one chat fails to serialize, so
 // prefer a defensive direct read of the chat store that skips unreadable
 // entries, and fall back to the public API only if that yields nothing.
-async function resolveGroupChat(groupName) {
+async function resolveGroupChatId(groupName) {
   let groups = [];
   try {
     groups = await client.pupPage.evaluate(() => {
@@ -149,7 +164,7 @@ async function resolveGroupChat(groupName) {
       `group "${groupName}" not found; groups seen: ${groups.map((g) => g.name).join(' | ') || 'none'}`
     );
   }
-  return { id: { _serialized: chat.id }, name: chat.name };
+  return chat.id;
 }
 
 // Removes regenerable Chromium cache dirs so the cloud cache stays small.
