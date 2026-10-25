@@ -62,33 +62,59 @@ client.on('qr', async (qr) => {
 
 client.on('ready', () => {
   console.log(`Connected as ${client.info.pushname}.`);
-  const round = () => sendAll().catch((err) => console.error('Send round failed:', err.message));
+  const round = () => {
+    const cfg = loadConfig();
+    return sendAll(cfg.contacts, cfg.message).catch((err) => console.error('Send round failed:', err.message));
+  };
   if (process.env.ONCE === '1') {
     (async () => {
       // GitHub's cron can skip slots, so the workflow fires every 5 minutes and
-      // this gate enforces the real cadence: at most one send per 30 minutes.
-      // The timestamp lives in a repo variable (updated via API after each
-      // send) because the actions cache never overwrites an existing entry.
+      // this gate enforces the real cadences: contacts without a "schedule" go
+      // out once per ~30 minutes; contacts with a "schedule" of "H:MM" (UTC)
+      // go out once per day, any run after their time if the exact slot was
+      // skipped. Timestamps live in repo variables (updated via API) because
+      // the actions cache never overwrites an existing entry.
+      const config = loadConfig();
+      const regular = config.contacts.filter((c) => !c.schedule);
+      const daily = config.contacts.filter((c) => c.schedule);
       const lastSendPath = path.join(__dirname, '.wwebjs_auth', 'last-send.txt');
       const minGapMs = 25 * 60 * 1000;
+
       let lastSend = parseInt(process.env.LAST_SEND || '0', 10) || 0;
       if (!lastSend) {
         try {
           lastSend = parseInt(fs.readFileSync(lastSendPath, 'utf8'), 10) || 0;
         } catch (e) { /* no marker yet */ }
       }
-      const sinceLast = Date.now() - lastSend;
-      if (lastSend && sinceLast < minGapMs) {
-        console.log(`Skipping: last send was ${Math.round(sinceLast / 60000)} min ago (target: every 30 min).`);
+      const regularDue = regular.length > 0 && (!lastSend || Date.now() - lastSend >= minGapMs);
+
+      const nowDate = new Date();
+      const todayKey = nowDate.toISOString().slice(0, 10);
+      const minutesNow = nowDate.getUTCHours() * 60 + nowDate.getUTCMinutes();
+      const dailyDue = daily.some((c) => {
+        const parts = String(c.schedule).split(':');
+        const dueMinutes = (parseInt(parts[0], 10) || 0) * 60 + (parseInt(parts[1], 10) || 0);
+        return minutesNow >= dueMinutes && process.env.LAST_DAILY !== todayKey;
+      });
+
+      if (!regularDue && !dailyDue) {
+        console.log('Skipping: nothing due (regular every 30 min; daily after their scheduled time).');
         client.destroy().finally(() => process.exit(0));
         return;
       }
-      await round();
-      const now = Date.now();
-      try {
-        fs.writeFileSync(lastSendPath, String(now));
-      } catch (e) { /* marker is best-effort */ }
-      await updateLastSendVariable(now);
+
+      if (regularDue) {
+        await sendAll(regular, config.message);
+        const now = Date.now();
+        try {
+          fs.writeFileSync(lastSendPath, String(now));
+        } catch (e) { /* marker is best-effort */ }
+        await updateVariable('LAST_SEND', String(now));
+      }
+      if (dailyDue) {
+        await sendAll(daily, config.message);
+        await updateVariable('LAST_DAILY', todayKey);
+      }
       cleanupBrowserCaches();
       console.log('ONCE mode: round complete, exiting.');
       client.destroy().finally(() => process.exit(0));
@@ -114,10 +140,9 @@ client.on('disconnected', (reason) => {
   process.exit(1);
 });
 
-async function sendAll() {
-  const config = loadConfig();
+async function sendAll(contacts, message) {
   console.log(`\n--- Send round started at ${new Date().toLocaleTimeString()} ---`);
-  let pending = config.contacts;
+  let pending = contacts;
   for (let pass = 1; pass <= 2; pass++) {
     const failed = [];
     for (const contact of pending) {
@@ -128,12 +153,12 @@ async function sendAll() {
           const attempts = [];
           try {
             const chat = await client.getChatById(groupId);
-            await chat.sendMessage(config.message);
+            await chat.sendMessage(message);
             sent = true;
           } catch (e1) {
             attempts.push(`chat.sendMessage: ${(e1 && e1.message) || e1}`);
             try {
-              await client.sendMessage(groupId, config.message);
+              await client.sendMessage(groupId, message);
               sent = true;
             } catch (e2) {
               attempts.push(`client.sendMessage: ${(e2 && e2.message) || e2}`);
@@ -143,7 +168,7 @@ async function sendAll() {
           console.log(`[sent]   ${contact.name} (${groupId})`);
         } else {
           const chatId = chatIdFor(contact.number);
-          await client.sendMessage(chatId, config.message);
+          await client.sendMessage(chatId, message);
           console.log(`[sent]   ${contact.name} (${chatId})`);
         }
       } catch (err) {
@@ -231,24 +256,33 @@ async function resolveGroupChatId(groupName) {
   return chat.id;
 }
 
-// Records the send time as a repo variable so the next runs can dedup.
-async function updateLastSendVariable(timestamp) {
+// Records a timestamp/marker as a repo variable (created on first use) so the
+// next runs can dedup. Used for the 30-minute cadence and the daily schedule.
+async function updateVariable(name, value) {
   const token = process.env.GH_PAT;
   const repo = process.env.GITHUB_REPOSITORY;
   if (!token || !repo) return;
   try {
-    const res = await fetch(`https://api.github.com/repos/${repo}/actions/variables/LAST_SEND`, {
+    const headers = {
+      Authorization: `token ${token}`,
+      Accept: 'application/vnd.github+json',
+      'Content-Type': 'application/json',
+    };
+    let res = await fetch(`https://api.github.com/repos/${repo}/actions/variables/${name}`, {
       method: 'PATCH',
-      headers: {
-        Authorization: `token ${token}`,
-        Accept: 'application/vnd.github+json',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ name: 'LAST_SEND', value: String(timestamp) }),
+      headers,
+      body: JSON.stringify({ name, value }),
     });
-    console.log(`Last-send timestamp ${res.ok ? 'updated' : 'update failed (HTTP ' + res.status + ')'}.`);
+    if (res.status === 404) {
+      res = await fetch(`https://api.github.com/repos/${repo}/actions/variables`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ name, value }),
+      });
+    }
+    console.log(`${name} ${res.ok ? 'updated' : 'update failed (HTTP ' + res.status + ')'}.`);
   } catch (e) {
-    console.error(`Could not update last-send variable: ${e.message}`);
+    console.error(`Could not update ${name}: ${e.message}`);
   }
 }
 

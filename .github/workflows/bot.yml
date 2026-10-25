@@ -52,6 +52,7 @@ jobs:
           MESSAGE: ${{ secrets.MESSAGE }}
           CONTACTS_JSON: ${{ secrets.CONTACTS_JSON }}
           LAST_SEND: ${{ vars.LAST_SEND }}
+          LAST_DAILY: ${{ vars.LAST_DAILY }}
           GH_PAT: ${{ secrets.GH_PAT }}
         run: node index.js
 
